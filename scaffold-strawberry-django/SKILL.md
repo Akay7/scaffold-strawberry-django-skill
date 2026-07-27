@@ -10,6 +10,13 @@ Generate the GraphQL layer for a Django model: a **Type + Filter**, **Inputs + M
 wire both into the schema. If the repo has a GraphQL conventions doc (e.g. `docs/graphql.md`),
 read it first and let it override anything below.
 
+**Scope**: this scaffolds a plain object/list-field API — query fields return `list[<Type>]` (or
+`strawberry_django.offset_paginated`), and objects aren't required to implement Relay's `Node`
+interface. It does not scaffold Relay-style **Global Object Identification** (a global `node(id:
+ID!)` root field resolving any type by opaque ID) or cursor-based **Connections** (`edges`/`node`/
+`pageInfo`, `first`/`after` arguments). If the target project's GraphQL layer is Relay-routed, treat
+everything below as needing translation to that shape rather than applying it as-is.
+
 Examples use the `Fruit` / `Color` models from the Strawberry-Django documentation as neutral
 placeholders (`Fruit` has a `name` and a FK `color` → `Color`). Substitute the real model.
 Before writing, find one existing Type and one existing mutation in the repo to copy the exact
@@ -141,6 +148,18 @@ Order within the file: **Filter first, then Type** (the Type references the Filt
   is the default for Inputs and Filters. Annotate `str` only to preserve an *existing* wire format
   that already ships plain values (e.g. a deployed output field clients read as lowercase strings) —
   never introduce a new `str`-annotated choice field.
+  - **Enum name collisions**: the generated GraphQL enum takes its name from the Python
+    `TextChoices`/`IntegerChoices` class itself, not from the model or field that uses it. GraphQL
+    type names are global, so two unrelated models each declaring their own inner class with the same
+    name (e.g. two different models both defining a `class Status(models.TextChoices)`) collide on
+    one GraphQL enum type — same failure mode as the mutation "Union name collisions" case below, and
+    same fix: give each its own distinct class name (`TransactionStatus`, `InviteStatus`, ...) rather
+    than a generic `Status` repeated per model. Check for an existing choices class with the same name
+    elsewhere in the codebase before adding a new one.
+  - Once introspection is disabled outside dev (see `DisableIntrospection` under "Defining the schema
+    object" below), a client can no longer discover an enum's members by querying the schema itself —
+    if a product feature needs the caller to know the valid values (e.g. to populate a picker), expose
+    them through an explicit query field, not through introspection.
 - For cross-app/cross-module related types, reference them **lazily** to avoid circular imports. Wrap the
   type in `typing.Annotated` with a *stringified* type name and `strawberry.lazy(<module path>)`:
   ```python
@@ -330,6 +349,7 @@ same module, after the `Query` and `Mutation` classes:
 import strawberry
 from django.conf import settings
 from strawberry.extensions import (
+    DisableIntrospection,
     MaxAliasesLimiter,
     MaxTokensLimiter,
     QueryDepthLimiter,
@@ -343,6 +363,12 @@ extensions = [
     lambda: MaxTokensLimiter(max_token_count=settings.STRAWBERRY_MAX_TOKENS),
     lambda: MaxAliasesLimiter(max_alias_count=settings.STRAWBERRY_MAX_ALIASES),
     lambda: QueryDepthLimiter(max_depth=settings.STRAWBERRY_MAX_QUERY_DEPTH),
+    # Don't publish the schema outside development: introspection is a
+    # reconnaissance aid against a production API, and nothing shipped should
+    # need clients to read the schema itself (they query declared fields).
+    # Mirrors DEBUG-gating other dev-only surfaces (e.g. a debug toolbar);
+    # dev keeps GraphiQL/introspection working.
+    *([] if settings.DEBUG else [DisableIntrospection]),
 ]
 
 schema = strawberry.Schema(
@@ -357,11 +383,18 @@ schema = strawberry.Schema(
 The variable **must be called `schema`** — Django/Strawberry config points at it by dotted path
 (e.g. `STRAWBERRY_DJANGO` / the `GraphQLView`'s `schema=`, typically `"<module>.schema:schema"`).
 
-**All four extensions are required:**
+**The four base extensions are required, plus a fifth in production:**
 
 - `DjangoOptimizerExtension()` — makes the "no manual `select_related`/`prefetch_related`" rule work.
 - `MaxTokensLimiter`, `MaxAliasesLimiter`, `QueryDepthLimiter` — abuse/DoS guards against oversized,
   alias-bombed, or deeply-nested queries. Never drop them.
+- `DisableIntrospection`, added only when `not settings.DEBUG` — introspection lets a caller read the
+  entire schema (every type, field, and enum value) without any query of their own; disabling it in
+  production removes that reconnaissance surface while leaving GraphiQL/introspection-based tooling
+  working in dev. Any product feature that needs client-visible reference data (e.g. an enum's valid
+  values) must ship as its own explicit query field rather than relying on introspection to expose it.
+  Gate it the same way the repo gates other dev-only surfaces (check `settings.py` for an existing
+  `DEBUG`-gated toggle, e.g. a debug toolbar, and mirror that condition rather than inventing a new one).
 
 #### Limiter values via environment variables
 
@@ -409,7 +442,15 @@ Suggest adding tests for the new queries/mutations, and `make makemigrations` on
 itself changed (this skill does not change models).
 
 **Test-writing conventions:**
-- One `@pytest.mark.django_db()` function per case — no test classes.
+- **Layout**: tests live in a per-app `tests/` package next to the model/type/mutation code being
+  tested (`<app>/tests/test_<stem>.py`), not in one repo-wide top-level test directory. Confirm this
+  against the project's actual test runner invocation (e.g. its CLAUDE.md/README "run a single test"
+  example) before assuming the path — the package name and how deep it nests can differ per repo.
+- One `@pytest.mark.django_db()` function per case — **no test classes**, even though pytest and
+  pytest-django both support (and their own docs often default to) grouping cases in a
+  `class Test<Something>:` container. Call this out explicitly because that default is easy to
+  reach for out of habit or from generic examples; this project's convention is flat, independent
+  functions per file, grouped only by filename — don't reintroduce classes "for organization."
 - Keep all GraphQL document strings as **constants at the top of the file** (queries and
   mutations), then helpers, then the test functions.
 - Always assign the query result to a variable (e.g. `res = gql_client.query(...)`) and inspect

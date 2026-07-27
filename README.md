@@ -7,9 +7,15 @@ Create/Update/Delete Inputs + Mutations, and the schema wiring to connect them.
 It's a `SKILL.md` of instructions for an LLM coding agent, not a code generator you run — the
 agent reads your existing models and conventions and writes matching code. It encodes a few
 non-obvious production gotchas: the `handle_django_errors` union-name collision on bare
-`create`/`update` method names, `annotate=` vs. per-row resolvers for computed fields, the
-delete-mutation pk-restore trick, and a no-leak-guarantee test pattern for authorization-sensitive
-relation inputs.
+`create`/`update` method names, a parallel enum-name collision on same-named `TextChoices` classes,
+`annotate=` vs. per-row resolvers for computed fields, the delete-mutation pk-restore trick, and a
+no-leak-guarantee test pattern for authorization-sensitive relation inputs.
+
+It targets a plain object/list-field API (query fields returning `list[<Type>]` or an
+offset-paginated field) — not Relay's **Node interface** (Global Object Identification via a global
+`node(id: ID!)` root field) or cursor-based **Connections** (`edges`/`pageInfo`). If your project's
+GraphQL layer is Relay-routed, its patterns need translating to that shape rather than applying
+as-is.
 
 ## Open standard
 
