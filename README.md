@@ -30,15 +30,27 @@ frontmatter's `allowed-tools` field is a Claude Code extension; other agents ign
 
 ## Installing
 
-Copy or symlink `scaffold-strawberry-django/` into your tool's skills directory, e.g.
+### Via gh tool (recommended)
+
+```bash
+gh skill install Akay7/scaffold-strawberry-django-skill
+# or pin version
+gh skill install Akay7/scaffold-strawberry-django-skill scaffold-strawberry-django --pin v1.0.0
+```
+
+### Manual
+
+Clone or download this repo.
+
+Copy or symlink `skills/scaffold-strawberry-django/` into your tool's skills directory, e.g.
 `.claude/skills/` (Claude Code), `.opencode/skills/` (OpenCode), or `.agents/skills/` (generic) —
 project-local or the equivalent `~/.config/...` / `~/.claude/...` global path.
 
 ```bash
-cp -r scaffold-strawberry-django /path/to/your/project/.claude/skills/
+cp -r skills/scaffold-strawberry-django /path/to/your/project/.claude/skills/
 # or, globally, to track updates from this repo's clone:
-ln -s "$(pwd)/scaffold-strawberry-django" ~/.claude/skills/scaffold-strawberry-django       # Claude Code, supported by OpenCode
-ln -s "$(pwd)/scaffold-strawberry-django" ~/.opencode/skills/scaffold-strawberry-django  # OpenCode
+ln -s "$(pwd)/skills/scaffold-strawberry-django" ~/.claude/skills/scaffold-strawberry-django       # Claude Code, supported by OpenCode
+ln -s "$(pwd)/skills/scaffold-strawberry-django" ~/.opencode/skills/scaffold-strawberry-django  # OpenCode
 ```
 
 ## License

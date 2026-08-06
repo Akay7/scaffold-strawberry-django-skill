@@ -1,6 +1,8 @@
 ---
 name: scaffold-strawberry-django
 description: Scaffold Strawberry-Django GraphQL artifacts (Type, Filter, Inputs, Mutations, schema wiring) for a Django model. Use when adding GraphQL read/CRUD support for a model.
+license: MIT
+user-invocable: true
 allowed-tools: Bash(grep *), Bash(find *), Bash(python *), Bash(ls *), Read(*), Edit(*), Write(*)
 ---
 
