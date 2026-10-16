@@ -185,3 +185,56 @@ raw response; an unauthenticated non-null field keeps "User is not authenticated
 user-scoped lookup gives an **identical** not-found message for another user's row and for a random
 id. Don't gate masking on `DEBUG`: the behaviour must be exercised before production.
 
+
+## Logging errors by cause (optional, recommended)
+
+Strawberry logs **every** GraphQL error at ERROR on the `strawberry.execution` logger: a client's
+syntax error, a limiter rejection, a deliberate `GraphQLError`, a refused permission — next to the
+real faults, so an alert on ERROR fires on clients' mistakes. And it logs `str(error)`, which
+appends an excerpt of the query document to the message, inline arguments included:
+`lookup(secret: "hunter2")` puts `hunter2` in the log.
+
+Override `process_errors` on a `strawberry.Schema` subclass and split by the masking rule above, so
+an error is logged as a fault exactly when its cause was hidden from the client — the operator
+gets the traceback the client was refused:
+
+```python
+import logging
+
+import strawberry
+from graphql import GraphQLError
+from strawberry.types import ExecutionContext
+
+
+class Schema(strawberry.Schema):
+    """Log server faults at ERROR with their traceback, everything else at INFO."""
+
+    def process_errors(
+        self,
+        errors: list[GraphQLError],
+        execution_context: ExecutionContext | None = None,
+    ) -> None:
+        logger = logging.getLogger("strawberry.execution")
+        for error in errors:
+            # `error.message`, never `str(error)`: that appends an excerpt of the query
+            # document — the client's inline arguments included — to every record.
+            extra = {"graphql_path": ".".join(map(str, error.path))} if error.path else {}
+            if should_mask_error(error):  # the masking rule: a fault the client never saw
+                logger.error("%s", error.message, exc_info=error.original_error, extra=extra)
+            else:  # the client's own request: syntax, limits, refusals, deliberate errors
+                logger.info("%s", error.message, extra=extra)
+
+
+schema = Schema(query=Query, mutation=Mutation, extensions=extensions)
+```
+
+- The class replaces `strawberry.Schema` in the `schema = …` line at the top of this file; nothing
+  else changes.
+- `graphql_path` (`fruit.createFruit`) says which field failed without logging the document.
+  Structured-logging setups pick it up as a field; a plain formatter needs `%(graphql_path)s` (or
+  ignores it).
+- A fault's message still goes to the log — that is the point: a connection error names its host
+  and role there, where the operator needs them, while the client got "Unexpected error.".
+- Pin it with `caplog`: a database failure is one ERROR record with `exc_info`; a deliberate
+  `GraphQLError` and an unknown field are INFO; and no record of a query with an inline argument
+  contains that argument's value.

@@ -3,7 +3,7 @@ name: scaffold-strawberry-django
 description: Scaffold Strawberry-Django GraphQL artifacts (Type, Filter, Inputs, Mutations, schema wiring) for a Django model. Use when adding GraphQL read/CRUD support for a model.
 license: MIT
 user-invocable: true
-allowed-tools: Bash(grep *), Bash(find *), Bash(python *), Bash(ls *), Read(*), Edit(*), Write(*)
+allowed-tools: Bash(grep *), Bash(find *), Bash(ls *), Bash(head *), Bash(python *), Bash(pytest *), Bash(mypy *), Bash(pyright *), Bash(uv run *), Read(*), Edit(*), Write(*)
 ---
 
 # Skill: scaffold-strawberry-django
@@ -14,8 +14,8 @@ read it first and let it override anything below.
 
 **Scope**: this scaffolds a plain object/list-field API — list query fields are
 `strawberry_django.offset_paginated` (a plain `list[<Type>]` only for small fixed sets), and
-objects aren't required to implement Relay's `Node` interface. It does not scaffold Relay-style **Global Object Identification** (a global `node(id:
-ID!)` root field resolving any type by opaque ID) or cursor-based **Connections** (`edges`/`node`/
+objects aren't required to implement Relay's `Node` interface. It does not scaffold Relay-style
+**Global Object Identification** (a global `node(id: ID!)` root field resolving any type by opaque ID) or cursor-based **Connections** (`edges`/`node`/
 `pageInfo`, `first`/`after` arguments). If the target project's GraphQL layer is Relay-routed, treat
 everything below as needing translation to that shape rather than applying it as-is.
 
@@ -41,10 +41,11 @@ Long reference material lives next to this file; read it only when the step says
 ## Shared modules (find or create)
 
 Every resolver below imports from two tiny shared modules. Look for them first
-(`grep -rn "def apply_input\|def sync_m2m\|def get_by_id\|IsStaff()\|IsAuthenticated()" .`); create only what is missing, in the
-project's shared package (e.g. `<pkg>/graphql.py`, `<pkg>/permissions.py`).
+(`grep -rn "def apply_input\|def sync_m2m\|def get_by_id\|def reread\|class IsAuthenticated\|IsStaff()" .`);
+create only what is missing, in the project's shared package (e.g. `<pkg>/graphql.py`,
+`<pkg>/permissions.py`).
 
-### `graphql.py` — `Info`, `apply_input`, `sync_m2m` and `get_by_id`
+### `graphql.py` — `Info`, `apply_input`, `sync_m2m`, `get_by_id` and `reread`
 
 ```python
 from collections.abc import Iterable
@@ -62,6 +63,7 @@ from strawberry_django.fields.types import (
     OneToManyInput,
     OneToOneInput,
 )
+from strawberry_django.optimizer import optimize
 
 #: Bare `strawberry.Info` defaults both parameters to `Any`, which turns every
 #: `info.context.…` into an unchecked expression; annotate resolvers with this.
@@ -79,7 +81,13 @@ def apply_input(data: object, instance: models.Model) -> list[str]:
     M2M and reverse-FK inputs need a saved instance and are skipped — apply them with
     ``sync_m2m`` after ``save()``.
 
-    Returns the names of the fields it set, so an update can ``save(update_fields=...)``
+    Each value goes to the *model* field the input field maps to — its
+    ``field_name=`` override (``title: str = strawberry_django.field(field_name="name")``)
+    if it has one. An input field that isn't a model field raises ``FieldDoesNotExist``
+    instead of being set as a stray attribute: take such a field (a flag, a
+    precondition) out of the input before calling this.
+
+    Returns the model field names it set, so an update can ``save(update_fields=...)``
     instead of rewriting the whole row (``references/concurrency.md``).
     """
     applied: list[str] = []
@@ -87,11 +95,13 @@ def apply_input(data: object, instance: models.Model) -> list[str]:
         value = getattr(data, field.name, strawberry.UNSET)
         if value is strawberry.UNSET or isinstance(value, ManyToManyInput | ManyToOneInput):
             continue
+        name = getattr(field, "django_name", None) or field.name
+        model_field = instance._meta.get_field(name)
         if isinstance(value, OneToManyInput | OneToOneInput):
-            setattr(instance, f"{field.name}_id", value.set)
+            setattr(instance, model_field.attname, value.set)
         else:
-            setattr(instance, field.name, value.value if isinstance(value, Enum) else value)
-        applied.append(field.name)
+            setattr(instance, name, value.value if isinstance(value, Enum) else value)
+        applied.append(model_field.name)  # `color`, also when the input maps it as `color_id`
     return applied
 
 
@@ -170,11 +180,27 @@ def get_by_id[M: models.Model](queryset: models.QuerySet[M], id: object) -> M:
         return queryset.get(pk=id)
     except (ValueError, ValidationError):
         return queryset.none().get()
+
+
+def reread[M: models.Model](instance: M, info: Info) -> M:
+    """``instance`` as stored, loaded the way a query loads it for this selection.
+
+    A create/update payload is otherwise the in-memory instance, which the optimizer
+    never sees: a selected ``annotate=`` field raises, a nested Type's ``get_queryset``
+    is skipped (a related row the caller may not see is returned), and a value the
+    database shapes on write (a ``DecimalField``'s scale) shows what was sent rather
+    than what was stored. One query, shaped by the payload's selection.
+    """
+    return optimize(type(instance)._default_manager.filter(pk=instance.pk), info).get()
 ```
 
 Create and update both go through `apply_input` — never hand-copy `data.<field>` onto the
-instance, which yields two field lists that drift apart. Their M2M and reverse-FK inputs go
-through `sync_m2m` after the save. Update and delete look their object up with `get_by_id`.
+instance, which yields two field lists that drift apart. It writes each input field to the model
+field it maps to (a `field_name=` rename included) and returns model field names, so
+`save(update_fields=…)` never meets an input-only name; an input field with no model field
+behind it is refused (`FieldDoesNotExist`) rather than silently dropped on create. Their M2M
+and reverse-FK inputs go through `sync_m2m` after the save. Update and delete look their object
+up with `get_by_id`; create and update return it through `reread`.
 
 ### `permissions.py` — shared permission extensions
 
@@ -339,7 +365,8 @@ Order within the file: **Filter first, then Type** (the Type references the Filt
     Lists are filtered by the library itself; a forward FK only by the **optimizer**, so the schema
     needs `DjangoOptimizerExtension`, and the parent must come from a queryset the library resolves.
     An instance your own code hands back — a resolver's `.first()`, a mutation payload, a plain-type
-    DTO — skips the scope, and its `user` is the hidden account. Scoping the related Type also
+    DTO — skips the scope, and its `user` is the hidden account; that is why create/update return
+    their row through the shared `reread` (step 3). Scoping the related Type also
     turns that relation's join into one prefetch query. It hides rows, not fields: every field of a
     row that passes is readable, so keep owner-only fields off a Type other callers can reach.
   - **Never write a resolver over a relation.** `def color(self) -> ColorType | None: return
@@ -363,15 +390,11 @@ Order within the file: **Filter first, then Type** (the Type references the Filt
     ```
     A bare expression works too; use the callable form when the expression depends on request time
     ("today"-relative windows) or the viewer. **Caveat:** the optimizer only annotates querysets it
-    resolves — a mutation's returned instance doesn't carry the annotation. For create/update,
-    re-read the saved row through the same annotation before returning (the alias is the field's
-    python name, so the default resolver finds it):
-    ```python
-    return cast(ColorType, Color.objects.annotate(sold_today=sold_today_count()).get(pk=obj.pk))
-    ```
-    Delete payloads can't do this (the row is gone) — they select `id` only. That re-read is a
-    standing cost: every mutation returning the Type, and every resolver or non-model type that
-    hands out its instances, needs it, or selecting the field raises. So before adding an
+    resolves — a mutation's returned instance doesn't carry the annotation. Create/update return
+    their row through the shared `reread(obj, info)` (step 3), which loads it through the
+    optimizer, so the annotation is there with no second copy of its expression. Delete payloads
+    can't do this (the row is gone) — they select `id` only. Every other resolver or non-model type
+    that hands out instances of the Type needs the same, or selecting the field raises. So before adding an
     `annotate=` field, check the next bullet — if the client can derive the value, don't add it.
   - **When the same filter and annotation are also needed off the Type** (a basket or checkout
     summary that lists these rows, a mutation's re-read), put them on the model's `QuerySet` as
@@ -404,10 +427,16 @@ Order within the file: **Filter first, then Type** (the Type references the Filt
     @classmethod
     def get_queryset(cls, queryset: QuerySet[<ModelName>], info: Info) -> QuerySet[<ModelName>]:
         user = get_current_user(info)
-        if user.is_authenticated and getattr(user, "is_staff", False):
+        if not user.is_authenticated:
+            return queryset.none()     # or the public rows, if anonymous callers may see some
+        if getattr(user, "is_staff", False):
             return queryset            # staff manage everything
-        return queryset.filter(...)    # scope; do NOT sort here
+        return queryset.filter(user=user)  # the scope; do NOT sort here
     ```
+    Handle the anonymous caller **first**. `get_queryset` runs wherever the Type is reached, not
+    only behind a gate — a nested relation under an ungated field, a public query — and
+    `filter(user=AnonymousUser())` raises `TypeError` ("Field 'id' expected a number but got
+    <AnonymousUser …>"), which the client sees as an unexpected error instead of nothing.
   - **Non-model result types** (a checkout summary, a "basket" that is a view over a user's rows,
     no table of its own) are legitimately a plain `@strawberry.type` over rows someone already
     read. Carry context in `strawberry.Private[...]` fields and cache the read in a private field so selecting
@@ -540,7 +569,7 @@ import strawberry_django
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 
-from <pkg>.graphql import Info, apply_input, get_by_id
+from <pkg>.graphql import Info, apply_input, get_by_id, reread
 from <pkg>.permissions import authenticated_required  # or staff_required
 
 
@@ -549,14 +578,14 @@ class FruitMutations:
     # Python method names are `create_fruit` / `update_fruit` / `delete_fruit`, never bare
     # `create` / `update` — see "Union name collisions". Exposed as `createFruit` etc.
     @strawberry_django.mutation(extensions=[authenticated_required])
-    def create_fruit(self, data: FruitCreateInput) -> FruitType:
+    def create_fruit(self, info: Info, data: FruitCreateInput) -> FruitType:
         # Construct with only what the input can't carry, e.g. the owner:
-        # Fruit(user=get_current_user(info)) — add `info: Info` to the signature for that.
+        # Fruit(user=get_current_user(info)).
         fruit = Fruit()
         apply_input(data, fruit)
         fruit.full_clean()
         fruit.save()
-        return cast(FruitType, fruit)
+        return cast(FruitType, reread(fruit, info))  # as stored, through the optimizer
 
     @strawberry_django.mutation(extensions=[authenticated_required])
     def update_fruit(self, info: Info, id: strawberry.ID, data: FruitUpdateInput) -> FruitType:
@@ -570,7 +599,7 @@ class FruitMutations:
         # whole-row save() would revert a column someone else changed after the read
         # (references/concurrency.md).
         fruit.save(update_fields=[*fields, "updated_at"])
-        return cast(FruitType, fruit)
+        return cast(FruitType, reread(fruit, info))
 
     @strawberry_django.mutation(extensions=[authenticated_required])
     def delete_fruit(self, info: Info, id: strawberry.ID) -> FruitType:
@@ -621,15 +650,31 @@ class FruitMutations:
   ```python
   @strawberry_django.mutation(extensions=[authenticated_required])
   @transaction.atomic
-  def create_fruit(self, data: FruitCreateInput) -> FruitType:
+  def create_fruit(self, info: Info, data: FruitCreateInput) -> FruitType:
       fruit = Fruit()
       apply_input(data, fruit)
       fruit.full_clean()
       fruit.save()
       sync_m2m(fruit.tags, data.tags, "tags")  # after save(): linking needs the row's pk
-      return cast(FruitType, fruit)
+      return cast(FruitType, reread(fruit, info))
   ```
   A raised `ValidationError` still rolls back first and then becomes `OperationInfo`.
+- **Create and update return their row through `reread(obj, info)`**, never the in-memory instance.
+  The instance is what the resolver built, and the optimizer never sees it, so three things go
+  wrong in the payload:
+  - a selected `annotate=` field raises (`'Fruit' object has no attribute 'tag_count'`) and the
+    payload is lost;
+  - a nested Type's `get_queryset` is skipped — `user { username }` returns an account the caller
+    may not see, where a query would answer `null`;
+  - a value the database shapes on write shows what was sent: `amount: "5000"` is stored as
+    `5000.00`, the payload says `"5000"`, and a client comparing it with a later read sees a
+    change that never happened (the same for a column a trigger sets).
+
+  `reread` loads the saved row through the optimizer for the payload's own selection — one query,
+  plus a prefetch per selected to-many relation. Django already fetches `db_default` and
+  `GeneratedField` values back on save on a backend with `RETURNING` (checked on Django 6 with
+  SQLite); `reread` covers the others too. Delete can't re-read (the row is gone), so its payload
+  selects `id` only.
 - **Update writes only the fields the input set** (`save(update_fields=...)`, template above) — never
   the whole row. For a record with several writers (users sharing it, a background job, offline
   clients) add the optional `updatedAt` precondition so a stale edit is refused instead of
@@ -637,6 +682,10 @@ class FruitMutations:
 - **Authorization-sensitive relation inputs and existence oracles** — a relation the caller must be
   *authorized* for (e.g. "must be *your* team"), and any failure branch whose message could reveal
   what exists — are covered in `references/authorization-and-leaks.md`. Read it when either applies.
+- **A create that must be safe to retry** (a client queueing writes offline) takes the client's
+  own UUID as an optional `id` and returns the existing row on a retry — the resolver, the race
+  between two retries, the pk default it relies on and what it exposes are in
+  `references/authorization-and-leaks.md`.
 - Validation lives **on the model** (`validators=`, a DB `CheckConstraint`, `Model.clean()`); the
   mutation just calls `obj.full_clean()`.
 
@@ -783,12 +832,12 @@ the reverse. Checklist (edit, don't regenerate):
   through a second Type or query field.
 - Per-row computed values: `strawberry_django.field(annotate=...)` (callable for request-time
   expressions), or named `QuerySet` methods composed in `get_queryset` when the same annotation is
-  reused off the Type — never a python resolver looping per row. Create/update resolvers re-read the
-  saved row through the same annotation so their payloads can select the field; delete payloads can't.
-  Because of that re-read, add one only for a value the client can't derive from fields it
-  already selects.
-- Don't call `refresh_from_db()` after save "just in case" — it doesn't refresh M2M and no column
-  changes after `save()`; an annotated re-read or nothing at all is correct.
+  reused off the Type — never a python resolver looping per row. Add one only for a value the
+  client can't derive from fields it already selects.
+- **Create/update payloads go through `reread(obj, info)`** — the saved row as stored, loaded by
+  the optimizer for the payload's selection (annotations, nested scopes, stored decimals). Not
+  `refresh_from_db()` (it skips M2M and the optimizer) and not the in-memory instance. Delete
+  payloads select `id` only.
 - Nullable relations, and any relation to a Type with a `get_queryset` (a non-null FK included),
   are annotated `RelatedType | None`; the related Type filters its own rows. M2M and reverse FKs: `auto` in both
   inputs, applied after the save with `sync_m2m` — `set` replaces the list, `add`/`remove` change

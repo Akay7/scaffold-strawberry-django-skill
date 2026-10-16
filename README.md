@@ -5,38 +5,65 @@ Django model using [Strawberry-Django](https://strawberry.rocks/docs/django): a 
 Create/Update/Delete Inputs + Mutations, and the schema wiring to connect them.
 
 It's a `SKILL.md` of instructions for an LLM coding agent, not a code generator you run — the
-agent reads your existing models and conventions and writes matching code. It encodes a few
+agent reads your existing models and conventions and writes matching code. It encodes the
 non-obvious production gotchas:
 
-- the `handle_django_errors` union-name collision on bare `create`/`update` method names, and a
-  parallel enum-name collision on same-named choices classes with `django-choices-field`;
+**Reading**
+
+- one Type per model, with who-sees-which-rows in its `get_queryset`; every Type that other rows
+  point at filters its own rows, and a relation to a scoped Type is `| None` — otherwise one hidden
+  related row nulls the whole response;
+- list fields are `OffsetPaginated`: a plain `list[...]`, nested ones included, returns every row
+  unless the client sends `pagination`;
+- the single-object query returns a QuerySet, not `.first()` — a bare instance skips the
+  optimizer, so `annotate=` fields crash and a nested Type's scope is bypassed;
+- `annotate=` / named `QuerySet` methods vs. per-row resolvers for computed fields;
 - choice fields are an enum only with `django-choices-field` or `GENERATE_ENUMS_FROM_CHOICES` (off
-  by default), and the two name and serialize the enum differently;
-- gating each mutation (not just the namespace) makes denial a typed `OperationInfo`;
+  by default); the two name and serialize the enum differently, the generated one must be written
+  back by `.value`, and same-named choices classes collide on one enum name.
+
+**Writing**
+
+- small shared helpers instead of per-model code: `apply_input` (FKs stay `auto` and
+  `full_clean()` validates them; `field_name=` renames honoured), `sync_m2m` (`set`, or
+  `add`/`remove`; unknown ids refused before anything is written), `get_by_id` (a malformed id is
+  not-found, not an unconverted `ValueError`) and `reread` (create/update payloads as stored,
+  loaded through the optimizer);
+- update/delete look the row up in what the caller may *change*, which can be narrower than what
+  they may see;
+- updates write only the fields sent (`save(update_fields=...)`), with an optional `updatedAt`
+  precondition, checked by one conditional `UPDATE`, for rows with several writers — and the
+  limits of that `UPDATE` (no `save()` override, no signals);
+- a create that is safe to retry from an offline queue, keyed by the client's UUID, and what that
+  exposes;
+- the `handle_django_errors` union-name collision on bare `create`/`update` method names;
 - delete returns the model's own type with the pk-restore trick, and `ProtectedError` from a
   `PROTECT` FK is not converted automatically;
-- one small shared `apply_input` applies create/update inputs (FKs stay `auto`, `full_clean()`
-  validates them) instead of per-model field lists or private lookup helpers, and a shared
-  `get_by_id` makes a malformed integer id not-found instead of an unconverted `ValueError`;
-- updates write only the fields the input set (`save(update_fields=...)`, not a whole-row save that
-  reverts a concurrent writer's columns), with an optional `updatedAt` precondition, checked by one
-  conditional `UPDATE`, for rows that have several writers;
-- `handle_django_errors` covers mutations only — a Django `ValidationError` in a *query* is masked or
-  can leak `"['…']"`, so a readable query failure is a `GraphQLError`;
+- a `null=True` string field without `blank=True` is silently required by `full_clean()`.
+
+**Errors and access**
+
+- gating each mutation (not just the namespace) makes denial a typed `OperationInfo`, and every
+  not-signed-in refusal carries the code `UNAUTHENTICATED` — clients match the code, never the
+  translatable message;
+- `handle_django_errors` covers mutations only — a Django `ValidationError` in a *query* is masked
+  or can leak `"['…']"`, so a readable query failure is a `GraphQLError`;
 - an error-masking recipe that hides unplanned failures (DB outages, a `ValidationError` carrying
-  connection details) but keeps `PermissionDenied` and a user-scoped not-found readable;
-- one Type per model, with audience-varying rows in `get_queryset`; update/delete reuse it;
-- `annotate=` / named `QuerySet` methods vs. per-row resolvers for computed fields;
-- a `null=True` string field without `blank=True` is silently required by `full_clean()`;
+  connection details) but keeps refusals and a user-scoped not-found readable, and error logging by
+  cause — faults at ERROR with their traceback, clients' mistakes at INFO, no query arguments in
+  the log;
+- introspection off outside `DEBUG`, decided per request so tests can switch it;
 - "no existence oracle" error design, pinned by parametrized identical-literal tests.
 
-The schema/limiter setup, concurrency, authorization-and-leak patterns and test conventions live in
-`skills/scaffold-strawberry-django/references/` and are read on demand, outside `SKILL.md`.
+The schema/limiter setup, error masking and logging, concurrency, authorization-and-leak patterns
+and test conventions live in `skills/scaffold-strawberry-django/references/` and are read on
+demand, outside `SKILL.md`.
 
-It assumes current releases (strawberry-graphql-django ≥ 0.89, Django 6 / Python 3.12+).
+It assumes current releases (strawberry-graphql-django ≥ 0.89, Django 6 / Python 3.12+); its
+recipes were checked against strawberry-graphql-django 0.93 and Django 6.1.
 
-It targets a plain object/list-field API (query fields returning `list[<Type>]` or an
-offset-paginated field) — not Relay's **Node interface** (Global Object Identification via a global
+It targets a plain object/list-field API (offset-paginated list fields, or a plain list for small
+fixed sets) — not Relay's **Node interface** (Global Object Identification via a global
 `node(id: ID!)` root field) or cursor-based **Connections** (`edges`/`pageInfo`). If your project's
 GraphQL layer is Relay-routed, its patterns need translating to that shape rather than applying
 as-is.
