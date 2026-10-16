@@ -87,7 +87,7 @@ inline fragments.
   "UNAUTHENTICATED"`) and a null namespace.
 - Not-found, and a malformed id (integer or UUID pk), on update/delete → the same
   `OperationInfo` (`kind: ERROR`), not a raised error.
-- Not-yours on update/delete: when callers can see rows they may not change (SKILL.md step 3, write
+- Not-yours on update/delete: when callers can see rows they may not change (`mutations.md`, write
   scope), the refused caller is one who **can see** the row (a teammate), not only a stranger. A
   stranger is refused even if the mutation wrongly looks the row up in the read scope, so only the
   teammate case catches that; assert the `OperationInfo` and that the row is unchanged.

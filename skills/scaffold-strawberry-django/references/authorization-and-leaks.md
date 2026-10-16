@@ -23,7 +23,7 @@ responses can't be told apart.
 
 ## Authorization-sensitive relation inputs
 
-`apply_input` (see SKILL.md) assigns *any* pk from a `{ set: id }` input, and `full_clean()` only
+`apply_input` (see `shared-modules.md`) assigns *any* pk from a `{ set: id }` input, and `full_clean()` only
 proves the row exists. A relation the caller must be authorized for (e.g. "must be *your*
 team") therefore needs an explicit check on what landed on the instance, **before**
 `full_clean()` so the two failure modes can't produce different messages:
@@ -45,14 +45,14 @@ obj.full_clean()
 
 `visible_teams(user)` should be the queryset that already backs the read side, not a second
 hand-rolled ownership rule — or the write scope that narrows it, when callers can see teams they
-may not use (SKILL.md step 3). Parametrize the test over `id_exists` (a real foreign row vs `uuid4()`)
+may not use (`mutations.md`, "The rows update and delete may touch"). Parametrize the test over `id_exists` (a real foreign row vs `uuid4()`)
 plus any other axis, like "caller has one at all".
 
 This is the one place a lookup is warranted. Where Django already checks something
 (`full_clean()` validating that a FK names a real row), don't write a private lookup helper.
 
 A **to-many** input (M2M, reverse FK) needs no hand-written check: give the shared `sync_m2m`
-(SKILL.md) the same visible set as `rows` —
+(`shared-modules.md`) the same visible set as `rows` —
 `sync_m2m(color.fruits, data.fruits, "fruits", rows=visible_fruits)`. It looks every id up in
 `rows` before writing, so a foreign, unknown or malformed id is one "Not found." on the field and
 nothing is linked. Pin it the same way: parametrize over a real foreign row vs `uuid4()`.
@@ -67,7 +67,7 @@ schema/error-handling stays uniform, and have the frontend treat an `OperationIn
 
 That is only safe if "not found" is the *only* failure a delete can produce. It is not once any FK
 to the model uses `on_delete=PROTECT`/`RESTRICT` — the resolver then also produces the
-`ProtectedError` → `ValidationError` case from SKILL.md, and the frontend can no longer treat every
+`ProtectedError` → `ValidationError` case from `mutations.md`, and the frontend can no longer treat every
 `OperationInfo` as success. Confirm the model has no protected reverse relations before relying on
 it, or distinguish by `kind`/`code`.
 
@@ -99,7 +99,7 @@ def create_fruit(self, info: Info, data: FruitCreateInput) -> FruitType:
   attempt — the first one to land wins. A client that edits a queued record before it syncs sends
   the edit as an update, not as a changed create.
 - **The existing row must be the caller's to change** — look it up in the write scope
-  (`writable_fruits`, SKILL.md step 3), or a caller could fetch another user's row by sending its
+  (`writable_fruits`, `mutations.md`), or a caller could fetch another user's row by sending its
   id. An id held by a row outside that scope is a collision: one `OperationInfo` on `field: "id"`,
   "Fruit with this Id already exists.", and the other row untouched.
 - **Accepted exposure.** That collision answer differs from a free id's (which is simply

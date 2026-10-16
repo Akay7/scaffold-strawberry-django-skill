@@ -162,7 +162,7 @@ Errors with no `original_error` (syntax, validation, limiter rejections) stay re
 gets its own rule:
 
 - **`PermissionDenied` — readable.** It is what `IsStaff` and other permission checks raise, with a
-  fixed message that carries nothing sensitive. The shared `IsAuthenticated` (SKILL.md,
+  fixed message that carries nothing sensitive. The shared `IsAuthenticated` (`shared-modules.md`,
   `permissions.py`) raises a `GraphQLError` with `extensions.code: "UNAUTHENTICATED"` instead, which
   the masker passes too. Clients tell "session gone, stop" from "this call failed" by that code —
   masked, a client retrying a batch records every remaining item as failed instead of stopping.

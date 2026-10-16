@@ -55,9 +55,11 @@ non-obvious production gotchas:
 - introspection off outside `DEBUG`, decided per request so tests can switch it;
 - "no existence oracle" error design, pinned by parametrized identical-literal tests.
 
-The schema/limiter setup, error masking and logging, concurrency, authorization-and-leak patterns
-and test conventions live in `skills/scaffold-strawberry-django/references/` and are read on
-demand, outside `SKILL.md`.
+`SKILL.md` holds the workflow, the mutation template and a rules checklist. The long recipes live
+in `skills/scaffold-strawberry-django/references/` and are read on demand: the shared helper code,
+Type/Filter design (relations, computed fields, choice fields), mutation details, the
+schema/limiter setup with error masking and logging, concurrency, authorization-and-leak patterns
+and test conventions.
 
 It assumes current releases (strawberry-graphql-django ≥ 0.89, Django 6 / Python 3.12+); its
 recipes were checked against strawberry-graphql-django 0.93 and Django 6.1.
